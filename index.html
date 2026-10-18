@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ant Colony Camera</title>
+<style>
+  :root {
+    --bg: #14110f; --panel: #1f1a17; --line: #3a302a; --text: #f1e9e2;
+    --muted: #a8998c; --accent: #e0a458; --ok: #7cc48b; --bad: #e07a6a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 16px;
+  }
+  .card h2 {
+    font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 0 0 10px; font-weight: 600;
+  }
+  .big { font-size: 1.6rem; font-weight: 700; }
+  .status { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .dot.busy { background: var(--accent); }
+  label { display: block; color: var(--muted); font-size: .9rem; margin: 10px 0 4px; }
+  select, input {
+    width: 100%; padding: 8px 10px; border-radius: 8px; font: inherit;
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  button {
+    font: inherit; font-weight: 600; padding: 10px 14px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text);
+    cursor: pointer; margin-top: 12px; width: 100%;
+  }
+  button.primary { background: var(--accent); color: #1a120b; border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .shot { width: 100%; border-radius: 8px; background: #000; aspect-ratio: 16/9; object-fit: contain; display: block; }
+  .muted { color: var(--muted); font-size: .9rem; }
+  .file { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .85rem; word-break: break-all; }
+  ol.log { margin: 0; padding: 0; list-style: none; max-height: 260px; overflow-y: auto; }
+  ol.log li { padding: 6px 0; border-bottom: 1px solid var(--line); font-size: .9rem; }
+  ol.log li:last-child { border-bottom: 0; }
+  ol.log .t { color: var(--muted); margin-right: 8px; font-variant-numeric: tabular-nums; }
+  ol.log .err { color: var(--bad); }
+  .full { grid-column: 1 / -1; }
+  video { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Ant Colony Camera</h1>
+  <p class="sub">Keep this tab open. Photos are taken on schedule, then the camera switches off to stay cool.</p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Status</h2>
+      <div class="status"><span class="dot" id="dot"></span><span id="statusText">Starting…</span></div>
+      <p class="muted" id="wakeText" style="margin:10px 0 0"></p>
+      <h2 style="margin-top:16px">Next photo</h2>
+      <div class="big" id="nextText">—</div>
+      <div class="muted" id="countdown"></div>
+    </section>
+
+    <section class="card">
+      <h2>Last photo</h2>
+      <img class="shot" id="lastImg" alt="Most recent colony photo">
+      <p class="file" id="lastName" style="margin:8px 0 0">None yet</p>
+    </section>
+
+    <section class="card">
+      <h2>Settings</h2>
+      <label for="camSel">Camera</label>
+      <select id="camSel"><option>Loading cameras…</option></select>
+      <div class="row">
+        <div><label for="t1">Morning photo</label><input type="time" id="t1" value="07:00"></div>
+        <div><label for="t2">Evening photo</label><input type="time" id="t2" value="19:00"></div>
+      </div>
+      <label for="delay">Wait after scheduled time for lights (seconds)</label>
+      <input type="number" id="delay" min="0" max="600" value="60">
+      <label for="warm">Camera warm-up before shooting (seconds)</label>
+      <input type="number" id="warm" min="1" max="60" value="10">
+      <button class="primary" id="testBtn">Take a test photo now</button>
+    </section>
+
+    <section class="card">
+      <h2>Activity</h2>
+      <ol class="log" id="log"></ol>
+    </section>
+  </div>
+  <video id="vid" playsinline muted></video>
+  <canvas id="cv" hidden></canvas>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem("antcam_" + k); return v === null ? d : v; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem("antcam_" + k, v); } catch {} }
+  };
+
+  // ---------- restore settings ----------
+  for (const id of ["t1", "t2", "delay", "warm"]) {
+    $(id).value = store.get(id, $(id).value);
+    $(id).addEventListener("change", () => { store.set(id, $(id).value); updateNext(); });
+  }
+
+  // ---------- helpers ----------
+  const pad = (n) => String(n).padStart(2, "0");
+  const WEEKDAYS = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+
+  // "Ant colony - 2026-10-17, Saturday, 7PM.jpg"
+  function fileName(d) {
+    const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const h = d.getHours();
+    const hour12 = h % 12 === 0 ? 12 : h % 12;
+    const ampm = h < 12 ? "AM" : "PM";
+    const mins = d.getMinutes() ? ":" + pad(d.getMinutes()) : "";
+    return `Ant colony - ${date}, ${WEEKDAYS[d.getDay()]}, ${hour12}${mins}${ampm}.jpg`;
+  }
+
+  function log(msg, isErr) {
+    const li = document.createElement("li");
+    const t = new Date();
+    li.innerHTML = `<span class="t">${t.toLocaleDateString()} ${t.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"})}</span>`;
+    const span = document.createElement("span");
+    span.textContent = msg;
+    if (isErr) span.className = "err";
+    li.appendChild(span);
+    $("log").prepend(li);
+    while ($("log").children.length > 60) $("log").lastChild.remove();
+  }
+
+  function setStatus(text, kind) {
+    $("statusText").textContent = text;
+    $("dot").className = "dot" + (kind ? " " + kind : "");
+  }
+
+  // ---------- cameras ----------
+  async function loadCameras() {
+    try {
+      // Ask once so camera names are visible, then release immediately.
+      const s = await navigator.mediaDevices.getUserMedia({ video: true });
+      s.getTracks().forEach((t) => t.stop());
+    } catch (e) {
+      setStatus("Camera permission needed — allow it and reload", "bad");
+      log("Camera permission was not granted: " + e.message, true);
+      return;
+    }
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    const sel = $("camSel");
+    sel.innerHTML = "";
+    cams.forEach((c, i) => {
+      const o = document.createElement("option");
+      o.value = c.deviceId;
+      o.textContent = c.label || `Camera ${i + 1}`;
+      sel.appendChild(o);
+    });
+    const saved = store.get("cam", "");
+    if (saved && cams.some((c) => c.deviceId === saved)) sel.value = saved;
+    else {
+      // Default to a USB camera if one is plugged in, not the built-in one.
+      const usb = cams.find((c) => /usb|uvc|ov2710|svpro|hd camera|webcam/i.test(c.label) && !/integrated|built-in|front|user facing/i.test(c.label));
+      if (usb) sel.value = usb.deviceId;
+    }
+    store.set("cam", sel.value);
+    sel.addEventListener("change", () => store.set("cam", sel.value));
+    setStatus("Ready — waiting for next photo", "ok");
+    log(`Found ${cams.length} camera(s). Using: ${sel.options[sel.selectedIndex]?.textContent}`);
+  }
+
+  // ---------- capture ----------
+  let busy = false;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  async function capture(when, reason) {
+    if (busy) return false;
+    busy = true;
+    $("testBtn").disabled = true;
+    let stream;
+    try {
+      setStatus("Taking photo…", "busy");
+      const request = navigator.mediaDevices.getUserMedia({
+        video: {
+          deviceId: $("camSel").value ? { exact: $("camSel").value } : undefined,
+          width: { ideal: 1920 }, height: { ideal: 1080 }
+        }
+      });
+      // If a permission prompt sits unanswered, give up instead of hanging forever,
+      // and make sure a late answer doesn't leave the camera running.
+      let timedOut = false;
+      stream = await Promise.race([
+        request,
+        sleep(90000).then(() => {
+          timedOut = true;
+          request.then((s) => s.getTracks().forEach((t) => t.stop())).catch(() => {});
+          throw new Error("camera permission prompt went unanswered (page needs a web address so Chrome remembers Allow)");
+        })
+      ]);
+      if (timedOut) throw new Error("timed out");
+      const v = $("vid");
+      v.srcObject = stream;
+      await v.play();
+      await sleep(Math.max(1, Number($("warm").value) || 10) * 1000); // let exposure, white balance and focus settle
+      const cv = $("cv");
+      cv.width = v.videoWidth; cv.height = v.videoHeight;
+      cv.getContext("2d").drawImage(v, 0, 0);
+      const blob = await new Promise((r) => cv.toBlob(r, "image/jpeg", 0.95));
+      if (!blob) throw new Error("could not encode the image");
+
+      const name = fileName(when);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      const old = $("lastImg").dataset.url;
+      if (old) URL.revokeObjectURL(old);
+      $("lastImg").src = url; $("lastImg").dataset.url = url;
+      $("lastName").textContent = name;
+      log(`${reason}: saved ${name} (${cv.width}×${cv.height})`);
+      setStatus("Ready — waiting for next photo", "ok");
+      return true;
+    } catch (e) {
+      log(`${reason} failed: ${e.message}`, true);
+      setStatus("Last photo failed — see Activity", "bad");
+      return false;
+    } finally {
+      if (stream) stream.getTracks().forEach((t) => t.stop()); // camera OFF between shots
+      $("vid").srcObject = null;
+      busy = false;
+      $("testBtn").disabled = false;
+    }
+  }
+
+  $("testBtn").addEventListener("click", () => {
+    const now = new Date();
+    capture(now, "Test photo");
+  });
+
+  // ---------- schedule ----------
+  function slotsFor(day) {
+    return ["t1", "t2"].map((id) => {
+      const [h, m] = ($(id).value || "00:00").split(":").map(Number);
+      const d = new Date(day); d.setHours(h, m, 0, 0);
+      return d;
+    }).sort((a, b) => a - b);
+  }
+
+  function nextSlot(now) {
+    const today = new Date(now); today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+    return [...slotsFor(today), ...slotsFor(tomorrow)].find((s) => s.getTime() + delayMs() > now.getTime());
+  }
+
+  const delayMs = () => (Number($("delay").value) || 0) * 1000;
+  const CATCH_UP_MS = 15 * 60 * 1000; // still take a slot's photo if we're up to 15 min late
+
+  function updateNext() {
+    const n = nextSlot(new Date());
+    if (!n) return;
+    $("nextText").textContent = n.toLocaleDateString([], { weekday: "long" }) + " " +
+      n.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const ms = n.getTime() + delayMs() - Date.now();
+    const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+    $("countdown").textContent = ms > 0 ? `in ${h}h ${m}m` : "now";
+  }
+
+  async function tick() {
+    updateNext();
+    if (busy) return;
+    const now = Date.now();
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    for (const slot of slotsFor(today)) {
+      const key = slot.toISOString();
+      const due = slot.getTime() + delayMs();
+      if (now >= due && now - due < CATCH_UP_MS && store.get("lastSlot", "") !== key) {
+        store.set("lastSlot", key);
+        await capture(slot, "Scheduled photo");
+        updateNext();
+        return;
+      }
+    }
+  }
+
+  // ---------- keep the screen awake ----------
+  let wakeLock = null;
+  async function keepAwake() {
+    try {
+      if ("wakeLock" in navigator && document.visibilityState === "visible") {
+        wakeLock = await navigator.wakeLock.request("screen");
+        $("wakeText").textContent = "Screen is being kept awake while this tab is showing.";
+        wakeLock.addEventListener("release", () => { $("wakeText").textContent = "Screen wake lock released — click back into this tab."; });
+      }
+    } catch {
+      $("wakeText").textContent = "Couldn't keep the screen awake automatically — set the Chromebook to stay awake while plugged in.";
+    }
+  }
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") keepAwake(); });
+
+  // ---------- start ----------
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setStatus("This browser can't use the camera", "bad");
+  } else {
+    loadCameras().then(() => { keepAwake(); tick(); setInterval(tick, 20000); });
+  }
+  updateNext();
+  setInterval(updateNext, 60000);
+
+  // exposed for testing
+  window.__antcam = { fileName, nextSlot };
+})();
+</script>
+</body>
+</html>
